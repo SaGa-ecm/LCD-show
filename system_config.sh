@@ -4,6 +4,7 @@ big_version=`lsb_release -r | awk -F ' '  '{printf $NF}'`
 deb_version=`cat /etc/debian_version | tr -d '\n'`
 hw_result=`tr -d '\0' < /proc/device-tree/model`
 
+# Erkennung für Raspberry Pi Zero 2 W hinzugefügt
 if grep -q "Raspberry Pi Zero 2" /proc/device-tree/model; then
     HARDWARE="raspi3"
     KERNELDIR="/lib/modules/$(uname -r)/kernel"
@@ -11,36 +12,34 @@ if grep -q "Raspberry Pi Zero 2" /proc/device-tree/model; then
 fi
 
 if [ $(getconf WORD_BIT) = '32' ] && [ $(getconf LONG_BIT) = '64' ] ; then
-hardware_arch=64
+    hardware_arch=64
 else
-hardware_arch=32
+    hardware_arch=32
 fi
 
 if [[ $hw_result == *"Raspberry Pi 5"* ]]; then
-hardware_model=5
+    hardware_model=5
 else
-hardware_model=255
+    hardware_model=255
 fi
 
 sudo raspi-config nonint do_wayland W1
 if [ -f /boot/firmware/config.txt ]; then
-sudo ln -sf /boot/firmware/config.txt /boot/config.txt
+    sudo ln -sf /boot/firmware/config.txt /boot/config.txt
 fi
 
 if [ $hardware_arch -eq 32 ]; then
-if [ $(($big_version)) -lt 10 ]; then
-sudo cp -rf ./boot/config-nomal-10.9-32.txt ./boot/config.txt.bak
-else
-if [[ "$deb_version" < "10.9" ]] || [[ "$deb_version" = "10.9" ]]; then
-sudo cp -rf ./boot/config-nomal-10.9-32.txt ./boot/config.txt.bak
-elif [[ "$deb_version" < "12.1" ]]; then
-sudo cp -rf ./boot/config-nomal-11.4-32.txt ./boot/config.txt.bak
-else
-sudo cp -rf ./boot/config-nomal-12.1-32.txt ./boot/config.txt.bak
-fi
-fi
+    if [ $(($big_version)) -lt 10 ]; then
+        sudo cp -rf ./boot/config-nomal-10.9-32.txt ./boot/config.txt.bak
+    else
+        if [[ "$deb_version" < "10.9" ]] || [[ "$deb_version" = "10.9" ]]; then
+            sudo cp -rf ./boot/config-nomal-10.9-32.txt ./boot/config.txt.bak
+        elif [[ "$deb_version" < "12.1" ]]; then
+            sudo cp -rf ./boot/config-nomal-11.4-32.txt ./boot/config.txt.bak
+        else
+            sudo cp -rf ./boot/config-nomal-12.1-32.txt ./boot/config.txt.bak
+        fi
+    fi
 elif [ $hardware_arch -eq 64 ]; then
-sudo cp -rf ./boot/config-nomal-11.4-64.txt ./boot/config.txt.bak
+    sudo cp -rf ./boot/config-nomal-11.4-64.txt ./boot/config.txt.bak
 fi
-
-
