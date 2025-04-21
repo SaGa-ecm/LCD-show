@@ -1,112 +1,414 @@
 #!/bin/bash
-
 # LCD35-show für DietPi auf Raspberry Pi Zero 2 W
 # Angepasst von dem Original-Script von goodtft/LCD-show
+# Version: 2.0
+
+# Log-Funktion für einheitliches Logging
+log() {
+    local level="$1"
+    local message="$2"
+    local color=""
+    
+    case "$level" in
+        "INFO") color="\033[0;32m" ;; # Grün
+        "WARN") color="\033[0;33m" ;; # Gelb
+        "ERROR") color="\033[0;31m" ;; # Rot
+        *) color="\033[0m" ;;
+    esac
+    
+    echo -e "${color}[$(date '+%Y-%m-%d %H:%M:%S')] [$level] $message\033[0m"
+}
+
+# Fehlerbehandlung verbessern
+trap 'log "ERROR" "Ein Fehler ist aufgetreten bei Zeile $LINENO. Exit-Code: $?"' ERR
+
+# Konfigurationsparameter
+LCD_SIZE="35"
+LCD_ROTATE="90"
+LCD_RESOLUTION="480 320"
+LCD_REFRESH="60"
+OVERLAY_NAME="tft35a"
+
+# Hilfe-Funktion
+show_help() {
+    echo "LCD35-show - Installationsskript für 3,5-Zoll-LCD auf DietPi"
+    echo ""
+    echo "Verwendung: sudo ./LCD35-show [OPTIONEN]"
+    echo ""
+    echo "Optionen:"
+    echo "  --help, -h          Diese Hilfe anzeigen"
+    echo "  --interactive, -i   Interaktiven Modus starten"
+    echo "  --rotate=GRAD       Display-Rotation (0, 90, 180, 270)"
+    echo "  --hdmi              Zurück zu HDMI wechseln"
+    echo "  --update            Nur Treiber aktualisieren"
+    echo ""
+    echo "Beispiel: sudo ./LCD35-show --rotate=90"
+    echo ""
+    exit 0
+}
+
+# Backup-Funktion
+create_backup() {
+    local backup_dir="/boot/lcd_backups/$(date '+%Y%m%d_%H%M%S')"
+    log "INFO" "Erstelle Backup in $backup_dir"
+    
+    sudo mkdir -p "$backup_dir"
+    sudo cp /boot/config.txt "$backup_dir/" 2>/dev/null || true
+    sudo cp -r /etc/X11/xorg.conf.d/ "$backup_dir/" 2>/dev/null || true
+    
+    # Speichere Installationsinformationen
+    echo "LCD35-show Backup $(date)" > "$backup_dir/info.txt"
+    
+    log "INFO" "Backup abgeschlossen"
+}
+
+# Wiederherstellungsfunktion
+restore_hdmi() {
+    log "INFO" "Stelle HDMI-Modus wieder her..."
+    
+    # Config.txt zurücksetzen
+    if [ -f /boot/config.txt.bak ]; then
+        sudo cp /boot/config.txt.bak /boot/config.txt
+    else
+        log "WARN" "Keine Backup-Datei gefunden, entferne LCD-spezifische Einträge"
+        sudo sed -i '/dtoverlay=tft/d' /boot/config.txt
+        sudo sed -i '/hdmi_cvt/d' /boot/config.txt
+    fi
+    
+    # Entferne LCD-spezifische Konfigurationen
+    sudo sed -i '/# LCD Display Konfiguration/,/hdmi_drive=2/d' /boot/config.txt
+    
+    log "INFO" "HDMI-Modus wiederhergestellt. Bitte System neu starten."
+    exit 0
+}
+
+# Prüfe und installiere benötigte Abhängigkeiten
+check_dependency() {
+    command -v $1 >/dev/null 2>&1 || {
+        log "WARN" "$1 nicht gefunden. Versuche zu installieren..."
+        sudo apt-get install -y $1 || log "ERROR" "Konnte $1 nicht installieren"
+    }
+}
+
+# Systemprüfung
+check_system() {
+    # Prüfe Raspberry Pi Modell
+    if [ -f /proc/device-tree/model ]; then
+        if ! grep -q "Raspberry Pi" /proc/device-tree/model; then
+            log "ERROR" "Kein Raspberry Pi erkannt. Abbruch."
+            exit 1
+        fi
+    else
+        log "WARN" "Konnte Raspberry Pi Modell nicht erkennen."
+    fi
+    
+    # Prüfe DietPi
+    if [ ! -f /etc/dietpi/dietpi/.version ]; then
+        log "WARN" "DietPi nicht erkannt. Dieses Skript ist für DietPi optimiert."
+        read -p "Trotzdem fortfahren? (j/n): " confirm
+        if [[ "$confirm" != "j" && "$confirm" != "J" ]]; then
+            log "INFO" "Installation abgebrochen."
+            exit 0
+        fi
+    fi
+    
+    # Prüfe freien Speicherplatz
+    free_space=$(df -h /boot | awk 'NR==2 {print $4}')
+    log "INFO" "Freier Speicherplatz in /boot: $free_space"
+    
+    # Prüfe RAM
+    total_ram=$(free -m | awk 'NR==2 {print $2}')
+    log "INFO" "Verfügbarer RAM: ${total_ram}MB"
+}
+
+# Fortschrittsanzeige
+show_progress() {
+    local pid=$1
+    local delay=0.5
+    local spinstr='|/-\'
+    
+    while [ "$(ps a | awk '{print $1}' | grep -w $pid)" ]; do
+        local temp=${spinstr#?}
+        printf " [%c] " "$spinstr"
+        local spinstr=$temp${spinstr%"$temp"}
+        sleep $delay
+        printf "\b\b\b\b\b"
+    done
+    printf "    \b\b\b\b"
+}
+
+# Prüfe auf Updates für das Skript
+check_updates() {
+    log "INFO" "Prüfe auf Updates..."
+    
+    if ! command -v git >/dev/null 2>&1; then
+        log "WARN" "Git nicht gefunden, überspringe Update-Prüfung"
+        return
+    fi
+    
+    # Aktuellen Branch ermitteln
+    current_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
+    if [ $? -ne 0 ]; then
+        log "WARN" "Nicht in einem Git-Repository, überspringe Update-Prüfung"
+        return
+    fi
+    
+    git fetch origin $current_branch >/dev/null 2>&1
+    local_rev=$(git rev-parse HEAD)
+    remote_rev=$(git rev-parse origin/$current_branch)
+    
+    if [ "$local_rev" != "$remote_rev" ]; then
+        log "INFO" "Updates verfügbar. Möchten Sie aktualisieren? (j/n)"
+        read -p "> " update_choice
+        if [[ "$update_choice" == "j" || "$update_choice" == "J" ]]; then
+            git pull origin $current_branch
+            log "INFO" "Update abgeschlossen. Bitte starten Sie das Skript neu."
+            exit 0
+        fi
+    else
+        log "INFO" "Skript ist aktuell."
+    fi
+}
+
+# Nur Treiber aktualisieren
+update_drivers() {
+    log "INFO" "Aktualisiere nur LCD-Treiber..."
+    
+    # Kopiere Overlay-Dateien
+    sudo cp ./usr/tft35a-overlay.dtb /boot/overlays/
+    sudo cp ./usr/tft35a-overlay.dtb /boot/overlays/tft35a.dtbo
+    
+    # Kopiere Kalibrierungsdatei
+    sudo cp -rf ./usr/99-calibration.conf-35-90 /etc/X11/xorg.conf.d/99-calibration.conf
+    
+    log "INFO" "Treiber-Update abgeschlossen. Bitte System neu starten."
+}
+
+# Parameter-Parsing
+for arg in "$@"; do
+    case $arg in
+        --help|-h)
+            show_help
+            ;;
+        --rotate=*)
+            LCD_ROTATE="${arg#*=}"
+            ;;
+        --hdmi)
+            restore_hdmi
+            ;;
+        --update)
+            update_drivers
+            exit 0
+            ;;
+        --interactive|-i)
+            INTERACTIVE=true
+            ;;
+    esac
+done
+
+# Interaktiver Modus
+if [ "$INTERACTIVE" = true ]; then
+    echo "LCD35-show Installationsassistent"
+    echo "=================================="
+    echo "1) LCD-Display installieren (Standard)"
+    echo "2) Zurück zu HDMI wechseln"
+    echo "3) Nur Treiber aktualisieren"
+    echo "4) Beenden"
+    
+    read -p "Bitte Option wählen [1-4]: " option
+    
+    case $option in
+        1) log "INFO" "Starte LCD-Installation..." ;;
+        2) restore_hdmi ;;
+        3) update_drivers; exit 0 ;;
+        4) log "INFO" "Installation abgebrochen"; exit 0 ;;
+        *) log "ERROR" "Ungültige Option"; exit 1 ;;
+    esac
+fi
+
+# Hauptprogramm beginnt hier
+log "INFO" "Starte LCD35-show Installation..."
+
+# Systemprüfung durchführen
+check_system
+
+# Prüfe auf Updates
+check_updates
+
+# Prüfe wichtige Abhängigkeiten
+check_dependency git
+check_dependency wget
+
+# Erstelle Backup
+create_backup
 
 # Systembackup erstellen
-echo "Erstelle Systembackup..."
-if [ -f ./system_backup.sh ]; then
+log "INFO" "Erstelle Systembackup..."
+if [ -f ./system_backup.sh ] ; then
     sudo ./system_backup.sh
 else
-    echo "Warnung: system_backup.sh nicht gefunden, überspringe Backup"
+    log "WARN" "system_backup.sh nicht gefunden, überspringe Backup"
 fi
 
 # Entferne alte Konfigurationen
-if [ -f /etc/X11/xorg.conf.d/40-libinput.conf ]; then
+if [ -f /etc/X11/xorg.conf.d/40-libinput.conf ] ; then
     sudo rm -rf /etc/X11/xorg.conf.d/40-libinput.conf
 fi
 
 # Erstelle Verzeichnis falls nicht vorhanden
-if [ ! -d /etc/X11/xorg.conf.d ]; then
+if [ ! -d /etc/X11/xorg.conf.d ] ; then
     sudo mkdir -p /etc/X11/xorg.conf.d
 fi
 
 # Kopiere Overlay-Dateien
-echo "Kopiere Overlay-Dateien..."
+log "INFO" "Kopiere Overlay-Dateien..."
 sudo cp ./usr/tft35a-overlay.dtb /boot/overlays/
 sudo cp ./usr/tft35a-overlay.dtb /boot/overlays/tft35a.dtbo
 
 # Lade Systemkonfiguration
-if [ -f ./system_config.sh ]; then
+if [ -f ./system_config.sh ] ; then
     source ./system_config.sh
 else
-    echo "Warnung: system_config.sh nicht gefunden"
+    log "WARN" "system_config.sh nicht gefunden"
 fi
 
-# Erstelle config.txt Backup
-sudo cp -rf /boot/config.txt /boot/config.txt.bak
+# Modellspezifische Optimierungen
+if [ -f /proc/device-tree/model ]; then
+    pi_model=$(tr -d '\0' < /proc/device-tree/model)
+    log "INFO" "Erkanntes Modell: $pi_model"
 
-# Konfiguriere config.txt für DietPi
-echo "Konfiguriere config.txt für DietPi mit 3,5-Zoll-LCD..."
-sudo tee -a /boot/config.txt > /dev/null << EOF
+    # Erstelle config.txt Backup
+    sudo cp -rf /boot/config.txt /boot/config.txt.bak
 
+    # Konfiguriere config.txt für DietPi
+    log "INFO" "Konfiguriere config.txt für DietPi mit 3,5-Zoll-LCD..."
+    
+    sudo tee -a /boot/config.txt > /dev/null << EOF
 # LCD Display Konfiguration
 hdmi_force_hotplug=1
 dtparam=i2c_arm=on
 dtparam=spi=on
 enable_uart=1
-dtoverlay=tft35a:rotate=90
+dtoverlay=${OVERLAY_NAME}:rotate=${LCD_ROTATE}
 hdmi_group=2
 hdmi_mode=1
 hdmi_mode=87
-hdmi_cvt 480 320 60 6 0 0 0
+hdmi_cvt ${LCD_RESOLUTION} ${LCD_REFRESH} 6 0 0 0
 hdmi_drive=2
 EOF
 
+    # Modellspezifische Anpassungen
+    case "$pi_model" in
+        *"Zero 2"*)
+            log "INFO" "Optimiere für Raspberry Pi Zero 2 W..."
+            sudo tee -a /boot/config.txt > /dev/null << EOF
+# Zero 2 spezifische Optimierungen
+gpu_mem=128
+EOF
+            ;;
+        *"Pi 4"*)
+            log "INFO" "Optimiere für Raspberry Pi 4..."
+            sudo tee -a /boot/config.txt > /dev/null << EOF
+# Pi 4 spezifische Optimierungen
+dtoverlay=vc4-fkms-v3d
+EOF
+            ;;
+        *)
+            log "INFO" "Verwende Standard-Konfiguration..."
+            ;;
+    esac
+else
+    log "WARN" "Konnte Raspberry Pi Modell nicht erkennen, verwende Standard-Konfiguration"
+    # Erstelle config.txt Backup
+    sudo cp -rf /boot/config.txt /boot/config.txt.bak
+
+    # Konfiguriere config.txt für DietPi
+    log "INFO" "Konfiguriere config.txt für DietPi mit 3,5-Zoll-LCD..."
+    
+    sudo tee -a /boot/config.txt > /dev/null << EOF
+# LCD Display Konfiguration
+hdmi_force_hotplug=1
+dtparam=i2c_arm=on
+dtparam=spi=on
+enable_uart=1
+dtoverlay=${OVERLAY_NAME}:rotate=${LCD_ROTATE}
+hdmi_group=2
+hdmi_mode=1
+hdmi_mode=87
+hdmi_cvt ${LCD_RESOLUTION} ${LCD_REFRESH} 6 0 0 0
+hdmi_drive=2
+EOF
+fi
+
 # Kopiere Kalibrierungsdatei
-echo "Kopiere Kalibrierungsdatei..."
+log "INFO" "Kopiere Kalibrierungsdatei..."
 sudo cp -rf ./usr/99-calibration.conf-35-90 /etc/X11/xorg.conf.d/99-calibration.conf
 
 # Prüfe DietPi-Version und kopiere fbturbo.conf wenn nötig
 dietpi_version=$(cat /etc/dietpi/dietpi/.version 2>/dev/null || echo "0")
-if [[ "$dietpi_version" < "12.1" ]]; then
-    echo "Kopiere fbturbo.conf für ältere DietPi-Version..."
+if [[ "$dietpi_version" < "12.1" ]] ; then
+    log "INFO" "Kopiere fbturbo.conf für ältere DietPi-Version..."
     sudo cp -rf ./usr/99-fbturbo.conf /usr/share/X11/xorg.conf.d/99-fbturbo.conf
 fi
 
 # Kopiere inittab
-sudo cp ./usr/inittab /etc/ 2>/dev/null || echo "Warnung: inittab nicht gefunden"
+if [ -f ./usr/inittab ]; then
+    sudo cp ./usr/inittab /etc/ 2>/dev/null || log "WARN" "Konnte inittab nicht kopieren"
+else
+    log "WARN" "inittab nicht gefunden"
+fi
 
 # Markiere als installiert
-echo "Markiere Installation als abgeschlossen..."
+log "INFO" "Markiere Installation als abgeschlossen..."
 sudo touch ./.have_installed
 echo "gpio:resistance:35:90:480:320" > ./.have_installed
 
 # FBCP Installation (für Framebuffer Kopieren)
-echo "Prüfe Internetverbindung für FBCP-Installation..."
+log "INFO" "Prüfe Internetverbindung für FBCP-Installation..."
 wget --spider -q -o /dev/null --tries=1 -T 10 https://cmake.org/
-if [ $? -eq 0 ]; then
-    echo "Installiere FBCP-Abhängigkeiten..."
+if [ $? -eq 0 ] ; then
+    log "INFO" "Installiere FBCP-Abhängigkeiten..."
     sudo apt-get update
     sudo apt-get install cmake libraspberrypi-dev -y
-
+    
     # Prüfe ob cmake installiert wurde
     type cmake > /dev/null 2>&1
-    if [ $? -eq 0 ]; then
-        echo "Installiere FBCP..."
+    if [ $? -eq 0 ] ; then
+        log "INFO" "Installiere FBCP..."
         sudo rm -rf rpi-fbcp
-        git clone https://github.com/tasanakorn/rpi-fbcp
-        cd rpi-fbcp
-        mkdir build
-        cd build
-        cmake ..
-        make
-        sudo install fbcp /usr/local/bin/fbcp
-        cd ../..
+        (
+            git clone https://github.com/tasanakorn/rpi-fbcp
+            cd rpi-fbcp
+            mkdir -p build
+            cd build
+            cmake ..
+            make
+            sudo install fbcp /usr/local/bin/fbcp
+        ) &
+        show_progress $!
+        log "INFO" "FBCP Installation abgeschlossen"
         
         # Füge FBCP zum Autostart hinzu
-        sudo sed -i 's/exit 0/fbcp \&\n\nexit 0/g' /etc/rc.local
+        if [ -d /etc/xdg/autostart ]; then
+            cat > /tmp/fbcp-autostart.desktop << EOF
+[Desktop Entry]
+Name=FBCP
+Comment=Framebuffer Copy
+Exec=fbcp
+Type=Application
+X-GNOME-Autostart-enabled=true
+EOF
+            sudo mv /tmp/fbcp-autostart.desktop /etc/xdg/autostart/
+            log "INFO" "FBCP zum Autostart hinzugefügt"
+        else
+            log "WARN" "Konnte FBCP nicht zum Autostart hinzufügen"
+        fi
     else
-        echo "Fehler: cmake konnte nicht installiert werden"
+        log "ERROR" "CMAKE nicht gefunden, FBCP-Installation übersprungen"
     fi
 else
-    echo "Keine Internetverbindung verfügbar, überspringe FBCP-Installation"
+    log "WARN" "Keine Internetverbindung, FBCP-Installation übersprungen"
 fi
 
-# Aktiviere SPI-Interface in DietPi
-if command -v dietpi-config > /dev/null; then
-    echo "Aktiviere SPI-Interface in DietPi..."
-    sudo dietpi-config 2 5 spi on
-fi
-
-echo "Installation abgeschlossen. Bitte starten Sie das System neu mit 'sudo reboot'"
+log "INFO" "Installation abgeschlossen. Bitte führen Sie einen Neustart durch."
+log "INFO" "Verwenden Sie 'sudo reboot' um das System neu zu starten."
