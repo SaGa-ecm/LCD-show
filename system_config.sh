@@ -4,6 +4,12 @@ big_version=`lsb_release -r | awk -F ' '  '{printf $NF}'`
 deb_version=`cat /etc/debian_version | tr -d '\n'`
 hw_result=`tr -d '\0' < /proc/device-tree/model`
 
+if grep -q "Raspberry Pi Zero 2" /proc/device-tree/model; then
+    HARDWARE="raspi3"
+    KERNELDIR="/lib/modules/$(uname -r)/kernel"
+    KERNEL_BUILD_DIR="$KERNELDIR/build"
+fi
+
 if [ $(getconf WORD_BIT) = '32' ] && [ $(getconf LONG_BIT) = '64' ] ; then
 hardware_arch=64
 else
