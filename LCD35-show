@@ -1,143 +1,112 @@
 #!/bin/bash
 
-sudo ./system_backup.sh
+# LCD35-show für DietPi auf Raspberry Pi Zero 2 W
+# Angepasst von dem Original-Script von goodtft/LCD-show
 
+# Systembackup erstellen
+echo "Erstelle Systembackup..."
+if [ -f ./system_backup.sh ]; then
+    sudo ./system_backup.sh
+else
+    echo "Warnung: system_backup.sh nicht gefunden, überspringe Backup"
+fi
+
+# Entferne alte Konfigurationen
 if [ -f /etc/X11/xorg.conf.d/40-libinput.conf ]; then
-sudo rm -rf /etc/X11/xorg.conf.d/40-libinput.conf
+    sudo rm -rf /etc/X11/xorg.conf.d/40-libinput.conf
 fi
+
+# Erstelle Verzeichnis falls nicht vorhanden
 if [ ! -d /etc/X11/xorg.conf.d ]; then
-sudo mkdir -p /etc/X11/xorg.conf.d
+    sudo mkdir -p /etc/X11/xorg.conf.d
 fi
+
+# Kopiere Overlay-Dateien
+echo "Kopiere Overlay-Dateien..."
 sudo cp ./usr/tft35a-overlay.dtb /boot/overlays/
 sudo cp ./usr/tft35a-overlay.dtb /boot/overlays/tft35a.dtbo
-#root_dev=`grep -oPr "root=[^\s]*" /boot/cmdline.txt | awk -F= '{printf $NF}'`
-#if test "$root_dev" = "/dev/mmcblk0p7";then
-#sudo cp -rf ./boot/config-noobs-nomal.txt ./boot/config.txt.bak
-#else
-#sudo cp -rf ./boot/config-nomal.txt ./boot/config.txt.bak
-#sudo echo "hdmi_force_hotplug=1" >> ./boot/config.txt.bak
-#fi
 
-source ./system_config.sh
-#sudo sed -i -e 's/dtoverlay=vc4-kms-v3d/#dtoverlay=vc4-kms-v3d/' ./boot/config.txt.bak
-sudo echo "hdmi_force_hotplug=1" >> ./boot/config.txt.bak
-sudo echo "dtparam=i2c_arm=on" >> ./boot/config.txt.bak
-sudo echo "dtparam=spi=on" >> ./boot/config.txt.bak
-sudo echo "enable_uart=1" >> ./boot/config.txt.bak
-sudo echo "dtoverlay=tft35a:rotate=90" >> ./boot/config.txt.bak
-sudo echo "hdmi_group=2" >> ./boot/config.txt.bak
-sudo echo "hdmi_mode=1" >> ./boot/config.txt.bak
-sudo echo "hdmi_mode=87" >> ./boot/config.txt.bak
-sudo echo "hdmi_cvt 480 320 60 6 0 0 0" >> ./boot/config.txt.bak
-sudo echo "hdmi_drive=2" >> ./boot/config.txt.bak
-sudo cp -rf ./boot/config.txt.bak /boot/config.txt
-
-sudo cp -rf ./usr/99-calibration.conf-35-90  /etc/X11/xorg.conf.d/99-calibration.conf
-if [[ "$deb_version" < "12.1" ]]; then
-sudo cp -rf ./usr/99-fbturbo.conf  /usr/share/X11/xorg.conf.d/99-fbturbo.conf
+# Lade Systemkonfiguration
+if [ -f ./system_config.sh ]; then
+    source ./system_config.sh
+else
+    echo "Warnung: system_config.sh nicht gefunden"
 fi
-#if test "$root_dev" = "/dev/mmcblk0p7";then
-#sudo cp ./usr/cmdline.txt-noobs /boot/cmdline.txt
-#else
-#sudo cp ./usr/cmdline.txt /boot/
-#fi
-sudo cp ./usr/inittab /etc/
-#sudo cp ./boot/config-35.txt /boot/config.txt
+
+# Erstelle config.txt Backup
+sudo cp -rf /boot/config.txt /boot/config.txt.bak
+
+# Konfiguriere config.txt für DietPi
+echo "Konfiguriere config.txt für DietPi mit 3,5-Zoll-LCD..."
+sudo tee -a /boot/config.txt > /dev/null << EOF
+
+# LCD Display Konfiguration
+hdmi_force_hotplug=1
+dtparam=i2c_arm=on
+dtparam=spi=on
+enable_uart=1
+dtoverlay=tft35a:rotate=90
+hdmi_group=2
+hdmi_mode=1
+hdmi_mode=87
+hdmi_cvt 480 320 60 6 0 0 0
+hdmi_drive=2
+EOF
+
+# Kopiere Kalibrierungsdatei
+echo "Kopiere Kalibrierungsdatei..."
+sudo cp -rf ./usr/99-calibration.conf-35-90 /etc/X11/xorg.conf.d/99-calibration.conf
+
+# Prüfe DietPi-Version und kopiere fbturbo.conf wenn nötig
+dietpi_version=$(cat /etc/dietpi/dietpi/.version 2>/dev/null || echo "0")
+if [[ "$dietpi_version" < "12.1" ]]; then
+    echo "Kopiere fbturbo.conf für ältere DietPi-Version..."
+    sudo cp -rf ./usr/99-fbturbo.conf /usr/share/X11/xorg.conf.d/99-fbturbo.conf
+fi
+
+# Kopiere inittab
+sudo cp ./usr/inittab /etc/ 2>/dev/null || echo "Warnung: inittab nicht gefunden"
+
+# Markiere als installiert
+echo "Markiere Installation als abgeschlossen..."
 sudo touch ./.have_installed
 echo "gpio:resistance:35:90:480:320" > ./.have_installed
 
-sudo apt-get update
-#FBCP install
+# FBCP Installation (für Framebuffer Kopieren)
+echo "Prüfe Internetverbindung für FBCP-Installation..."
 wget --spider -q -o /dev/null --tries=1 -T 10 https://cmake.org/
 if [ $? -eq 0 ]; then
-#sudo apt-get update
-sudo apt-get install cmake libraspberrypi-dev -y 2> error_output.txt
-result=`cat ./error_output.txt`
-echo -e "\033[31m$result\033[0m"
-grep -q "^E:" ./error_output.txt
-type cmake > /dev/null 2>&1
-if [ $? -eq 0 ]; then
-sudo rm -rf rpi-fbcp
-wget --spider -q -o /dev/null --tries=1 -T 10 https://github.com
-if [ $? -eq 0 ]; then
-sudo git clone https://github.com/tasanakorn/rpi-fbcp
-if [ $? -ne 0 ]; then
-echo "download fbcp failed, copy native fbcp!!!"
-sudo cp -r ./usr/rpi-fbcp .
-fi
+    echo "Installiere FBCP-Abhängigkeiten..."
+    sudo apt-get update
+    sudo apt-get install cmake libraspberrypi-dev -y
+
+    # Prüfe ob cmake installiert wurde
+    type cmake > /dev/null 2>&1
+    if [ $? -eq 0 ]; then
+        echo "Installiere FBCP..."
+        sudo rm -rf rpi-fbcp
+        git clone https://github.com/tasanakorn/rpi-fbcp
+        cd rpi-fbcp
+        mkdir build
+        cd build
+        cmake ..
+        make
+        sudo install fbcp /usr/local/bin/fbcp
+        cd ../..
+        
+        # Füge FBCP zum Autostart hinzu
+        sudo sed -i 's/exit 0/fbcp \&\n\nexit 0/g' /etc/rc.local
+    else
+        echo "Fehler: cmake konnte nicht installiert werden"
+    fi
 else
-echo "bad network, copy native fbcp!!!"
-sudo cp -r ./usr/rpi-fbcp .
-fi
-sudo mkdir ./rpi-fbcp/build
-cd ./rpi-fbcp/build/
-sudo cmake ..
-sudo make
-sudo install fbcp /usr/local/bin/fbcp
-cd - > /dev/null
-type fbcp > /dev/null 2>&1
-if [ $? -eq 0 ]; then
-if [[ "$deb_version" < "12.1" ]]; then
-sudo cp -rf ./usr/99-fbturbo-fbcp.conf  /usr/share/X11/xorg.conf.d/99-fbturbo.conf
-fi
-sudo cp -rf ./etc/rc.local /etc/rc.local
-fi
-else
-echo "install cmake error!!!!"
-fi
-else
-echo "bad network, can't install cmake!!!"
+    echo "Keine Internetverbindung verfügbar, überspringe FBCP-Installation"
 fi
 
-#evdev install
-#nodeplatform=`uname -n`
-#kernel=`uname -r`
-version=`uname -v`
-#if test "$nodeplatform" = "raspberrypi";then
-#echo "this is raspberrypi kernel"
-input_result=0
-version=${version##* }
-#version=${version#*#}
-echo $version
-if test $version -lt 2017;then
-echo "reboot"
-else
-echo "need to update touch configuration"
-wget --spider -q -o /dev/null --tries=1 -T 10 http://mirrors.zju.edu.cn/raspbian/raspbian
-if [ $? -ne 0 ]; then
-input_result=1
-else
-sudo apt-get install xserver-xorg-input-evdev  2> error_output.txt
-dpkg -l | grep xserver-xorg-input-evdev > /dev/null 2>&1
-if [ $? -ne 0 ]; then
-input_result=1
-fi
-fi
-if [ $input_result -eq 1 ]; then 
-if [ $hardware_arch -eq 32 ]; then
-sudo dpkg -i -B ./xserver-xorg-input-evdev_1%3a2.10.6-1+b1_armhf.deb 2> error_output.txt
-elif [ $hardware_arch -eq 64 ]; then
-sudo dpkg -i -B ./xserver-xorg-input-evdev_1%3a2.10.6-2_arm64.deb 2> error_output.txt
-fi
-fi
-result=`cat ./error_output.txt`
-echo -e "\033[31m$result\033[0m"
-grep -q "error:" ./error_output.txt && exit
-sudo cp -rf /usr/share/X11/xorg.conf.d/10-evdev.conf /usr/share/X11/xorg.conf.d/45-evdev.conf
-#echo "reboot"
-fi
-#else
-#echo "this is not raspberrypi kernel, no need to update touch configure, reboot"
-#fi
-
-sudo sync
-sudo sync
-sleep 1
-if [ $# -eq 1 ]; then
-sudo ./rotate.sh $1
-elif [ $# -gt 1 ]; then
-echo "Too many parameters"
+# Aktiviere SPI-Interface in DietPi
+if command -v dietpi-config > /dev/null; then
+    echo "Aktiviere SPI-Interface in DietPi..."
+    sudo dietpi-config 2 5 spi on
 fi
 
-echo "reboot now"
-sudo reboot
+echo "Installation abgeschlossen. Bitte starten Sie das System neu mit 'sudo reboot'"
